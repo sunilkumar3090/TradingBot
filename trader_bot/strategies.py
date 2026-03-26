@@ -283,3 +283,240 @@ class VCPStrategy(Strategy):
             if high > 0:
                 contractions.append((high - low) / high * 100)
         return contractions
+
+
+# ---------------------------------------------------------------------------
+# Strategy 4: VWAP + VWAP Band Strategy (institutional anchor)
+# ---------------------------------------------------------------------------
+
+class VWAPStrategy(Strategy):
+    """
+    Trades mean-reversion and trend continuation around VWAP.
+
+    Long setups:
+      - Price dips to VWAP lower band (1 std dev) and bounces with volume
+      - Price breaks above VWAP and retests it as support (trend continuation)
+
+    Short setups:
+      - Price spikes to VWAP upper band and rejects with volume
+      - Price breaks below VWAP and retests it as resistance
+
+    Requires intraday data (1min or 5min candles for the current session).
+    The 'date' column or index must be a DatetimeIndex.
+    """
+
+    def __init__(self, band_multiplier: float = 1.0, atr_multiplier: float = 1.2):
+        self.band_multiplier = band_multiplier
+        self.atr_multiplier = atr_multiplier
+
+    def generate_signal(self, df: pd.DataFrame, symbol: str) -> Signal:
+        self._validate_df(df, min_rows=10)
+        df = df.copy()
+
+        # Compute VWAP and bands for the session
+        df["typical_price"] = (df["high"] + df["low"] + df["close"]) / 3
+        df["tp_vol"] = df["typical_price"] * df["volume"]
+        df["cum_tp_vol"] = df["tp_vol"].cumsum()
+        df["cum_vol"] = df["volume"].cumsum()
+        df["vwap"] = df["cum_tp_vol"] / df["cum_vol"].replace(0, np.nan)
+
+        # Rolling std dev of typical price for bands
+        df["vwap_std"] = df["typical_price"].rolling(20).std()
+        df["upper_band"] = df["vwap"] + self.band_multiplier * df["vwap_std"]
+        df["lower_band"] = df["vwap"] - self.band_multiplier * df["vwap_std"]
+
+        prev, curr = df.iloc[-2], df.iloc[-1]
+        entry = float(curr["close"])
+        atr = MovingAverageCrossoverStrategy._atr(df)
+
+        vwap = float(curr["vwap"])
+        upper = float(curr["upper_band"])
+        lower = float(curr["lower_band"])
+
+        avg_vol = df["volume"].rolling(20).mean().iloc[-1]
+        vol_confirm = curr["volume"] > avg_vol * 1.2
+
+        # --- Long: bounce off lower VWAP band ---------------------------------
+        if (
+            prev["close"] <= prev["lower_band"]
+            and curr["close"] > curr["lower_band"]
+            and vol_confirm
+        ):
+            stop_loss = round(entry - self.atr_multiplier * atr, 2)
+            target = round(vwap + (vwap - stop_loss), 2)  # target = opposite VWAP side
+            return Signal(
+                signal_type=SignalType.BUY,
+                symbol=symbol,
+                entry_price=entry,
+                stop_loss=stop_loss,
+                target=target,
+                strategy_name="VWAP_Bounce",
+                confidence=0.72,
+                notes=f"Bounce off lower band. VWAP={vwap:.2f}, Band={lower:.2f}",
+            )
+
+        # --- Long: retest of VWAP as support (trend continuation) -------------
+        if (
+            prev["close"] > prev["vwap"]
+            and curr["low"] <= curr["vwap"]
+            and curr["close"] > curr["vwap"]
+            and vol_confirm
+        ):
+            stop_loss = round(lower, 2)
+            target = round(upper, 2)
+            return Signal(
+                signal_type=SignalType.BUY,
+                symbol=symbol,
+                entry_price=entry,
+                stop_loss=stop_loss,
+                target=target,
+                strategy_name="VWAP_Retest_Support",
+                confidence=0.75,
+                notes=f"VWAP retest as support. VWAP={vwap:.2f}",
+            )
+
+        # --- Short: rejection at upper VWAP band ------------------------------
+        if (
+            prev["close"] >= prev["upper_band"]
+            and curr["close"] < curr["upper_band"]
+            and vol_confirm
+        ):
+            stop_loss = round(entry + self.atr_multiplier * atr, 2)
+            target = round(vwap - (stop_loss - vwap), 2)
+            return Signal(
+                signal_type=SignalType.SELL,
+                symbol=symbol,
+                entry_price=entry,
+                stop_loss=stop_loss,
+                target=target,
+                strategy_name="VWAP_Rejection",
+                confidence=0.70,
+                notes=f"Rejection at upper band. VWAP={vwap:.2f}, Band={upper:.2f}",
+            )
+
+        return Signal(
+            signal_type=SignalType.HOLD,
+            symbol=symbol,
+            entry_price=entry,
+            stop_loss=0.0,
+            target=0.0,
+            strategy_name="VWAP",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Strategy 5: Opening Range Breakout (ORB)
+# ---------------------------------------------------------------------------
+
+class ORBStrategy(Strategy):
+    """
+    Opening Range Breakout — one of the highest win-rate intraday patterns.
+
+    Logic:
+      - Define the opening range: high/low of the first N minutes (default 15).
+      - BUY when price breaks above the opening range high with volume.
+      - SELL when price breaks below the opening range low with volume.
+      - Stop loss: opposite side of the opening range.
+      - Target: at least 1:2 R:R (configurable).
+
+    Requires 1-min or 5-min intraday data. The DataFrame index must be
+    a DatetimeIndex. Call this only after the opening range candle has closed.
+    """
+
+    def __init__(
+        self,
+        opening_range_minutes: int = 15,
+        volume_multiplier: float = 1.5,
+        rr_ratio: float = 2.0,
+    ):
+        self.opening_range_minutes = opening_range_minutes
+        self.volume_multiplier = volume_multiplier
+        self.rr_ratio = rr_ratio
+
+    def generate_signal(self, df: pd.DataFrame, symbol: str) -> Signal:
+        self._validate_df(df, min_rows=5)
+        df = df.copy()
+
+        if not isinstance(df.index, pd.DatetimeIndex):
+            raise ValueError("ORBStrategy requires a DatetimeIndex.")
+
+        session_start = df.index[0]
+        or_end = session_start + pd.Timedelta(minutes=self.opening_range_minutes)
+
+        or_df = df[df.index <= or_end]
+        if or_df.empty:
+            return self._hold(symbol, df)
+
+        or_high = float(or_df["high"].max())
+        or_low = float(or_df["low"].min())
+        or_range = or_high - or_low
+
+        # Only trade if we're past the opening range
+        post_or_df = df[df.index > or_end]
+        if post_or_df.empty:
+            return self._hold(symbol, df)
+
+        curr = post_or_df.iloc[-1]
+        prev = post_or_df.iloc[-2] if len(post_or_df) >= 2 else or_df.iloc[-1]
+
+        entry = float(curr["close"])
+        avg_vol = df["volume"].rolling(10).mean().iloc[-1]
+        vol_confirm = float(curr["volume"]) > avg_vol * self.volume_multiplier
+
+        # --- Bullish breakout -------------------------------------------------
+        if (
+            float(prev["close"]) <= or_high
+            and entry > or_high
+            and vol_confirm
+        ):
+            stop_loss = round(or_low, 2)
+            risk = entry - stop_loss
+            target = round(entry + self.rr_ratio * risk, 2)
+            return Signal(
+                signal_type=SignalType.BUY,
+                symbol=symbol,
+                entry_price=entry,
+                stop_loss=stop_loss,
+                target=target,
+                strategy_name="ORB_Bullish",
+                confidence=0.78,
+                notes=(
+                    f"ORB breakout above {or_high:.2f}. "
+                    f"Range={or_range:.2f}, Vol={curr['volume']:.0f}"
+                ),
+            )
+
+        # --- Bearish breakdown ------------------------------------------------
+        if (
+            float(prev["close"]) >= or_low
+            and entry < or_low
+            and vol_confirm
+        ):
+            stop_loss = round(or_high, 2)
+            risk = stop_loss - entry
+            target = round(entry - self.rr_ratio * risk, 2)
+            return Signal(
+                signal_type=SignalType.SELL,
+                symbol=symbol,
+                entry_price=entry,
+                stop_loss=stop_loss,
+                target=target,
+                strategy_name="ORB_Bearish",
+                confidence=0.75,
+                notes=(
+                    f"ORB breakdown below {or_low:.2f}. "
+                    f"Range={or_range:.2f}, Vol={curr['volume']:.0f}"
+                ),
+            )
+
+        return self._hold(symbol, df)
+
+    def _hold(self, symbol: str, df: pd.DataFrame) -> Signal:
+        return Signal(
+            signal_type=SignalType.HOLD,
+            symbol=symbol,
+            entry_price=float(df["close"].iloc[-1]),
+            stop_loss=0.0,
+            target=0.0,
+            strategy_name="ORB",
+        )
