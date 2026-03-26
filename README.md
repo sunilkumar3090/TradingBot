@@ -9,18 +9,19 @@
 ```
 trading-bot/
 ├── trader_bot/
-│   ├── auth.py          # OAuth flow, daily token refresh
-│   ├── data_stream.py   # KiteTicker WebSocket → Redis
-│   ├── strategies.py    # MA Crossover, Momentum (RSI), VCP
-│   ├── execution.py     # Order placement, bracket orders, rate limiting
-│   ├── risk_manager.py  # Position sizing, drawdown gate, DB logging
-│   └── main.py          # FastAPI app + trading loop
+│   ├── auth.py            # OAuth flow, daily token refresh
+│   ├── data_stream.py     # KiteTicker WebSocket → Redis tick cache
+│   ├── strategies.py      # 5 strategies: ORB, VWAP, Momentum, VCP, MA Crossover
+│   ├── market_context.py  # Market regime detection (ADX + volatility + Nifty bias)
+│   ├── execution.py       # Order placement, bracket orders, rate limiting
+│   ├── risk_manager.py    # Position sizing, drawdown gate, DB logging
+│   └── main.py            # FastAPI app + regime-aware trading loop
 ├── evaluator_bot/
-│   ├── evaluator.py     # P&L, Sharpe, Win Rate, Max Drawdown
-│   ├── ai_advisor.py    # OpenAI / Kite MCP post-market report
-│   └── celery_app.py    # Celery Beat scheduler
+│   ├── evaluator.py       # P&L, Sharpe, Win Rate, Max Drawdown
+│   ├── ai_advisor.py      # OpenAI / Kite MCP post-market report + Telegram
+│   └── celery_app.py      # Celery Beat scheduler
 ├── config/
-│   └── settings.py      # Pydantic settings from .env
+│   └── settings.py        # Pydantic settings from .env
 ├── requirements.txt
 ├── .env.example
 ├── docker-compose.yml
@@ -95,31 +96,55 @@ generate_session('PASTE_REQUEST_TOKEN_HERE')
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/status` | Health check |
-| `POST` | `/start` | Start trading loop |
-| `POST` | `/stop` | Emergency stop (cancels all orders) |
-| `GET` | `/positions` | View current positions |
+| `GET` | `/status` | Health check + bot state |
+| `GET` | `/market_context` | Live market regime analysis |
+| `POST` | `/start` | Start the trading loop |
+| `POST` | `/stop` | Emergency stop — cancels all open orders |
+| `GET` | `/positions` | View current intraday positions |
 | `POST` | `/manual_order` | Place a manual order |
 
-Interactive docs at: `http://localhost:8000/docs`
+Interactive docs: `http://localhost:8000/docs`
 
 ---
 
 ## Strategies
 
-| Strategy | Logic | Confidence |
-|---|---|---|
-| `MA_Crossover` | Fast EMA crosses above/below slow EMA | 0.6 |
-| `Momentum_RSI` | RSI crosses oversold on a volume spike | 0.7 |
-| `VCP` | Volatility Contraction Pattern breakout | 0.8 |
+Strategies run in priority order every 5 minutes. Only strategies compatible with the current market regime are executed.
+
+| Priority | Strategy | Signal Logic | Confidence |
+|---|---|---|---|
+| 1 | `ORB_Bullish` / `ORB_Bearish` | Break above/below first-15-min range on 1.5x volume | 0.75–0.78 |
+| 2 | `VWAP_Bounce` | Price dips to VWAP lower band and recovers with volume | 0.72 |
+| 2 | `VWAP_Retest_Support` | Price retests VWAP as support in a trend | 0.75 |
+| 2 | `VWAP_Rejection` | Price rejected at VWAP upper band (short) | 0.70 |
+| 3 | `Momentum_RSI` | RSI crosses oversold threshold on a volume spike | 0.70 |
+| 4 | `VCP` | Volatility Contraction Pattern breakout | 0.80 |
+| 5 | `MA_Crossover` | Fast EMA crosses above/below slow EMA | 0.60 |
+
+---
+
+## Market Regime Detection
+
+Before every trade cycle the bot classifies the market using Nifty 50 daily data:
+
+| Regime | Condition | Position Size | Allowed Strategies |
+|---|---|---|---|
+| `TRENDING_BULL` | ADX ≥ 25, price > EMA20 | 100% | ORB, VWAP Retest, Momentum, VCP, MA |
+| `TRENDING_BEAR` | ADX ≥ 25, price < EMA20 | 80% | ORB short, VWAP Rejection, MA |
+| `MEAN_REVERTING` | ADX < 25 | 70% | VWAP Bounce, VWAP Retest, Momentum |
+| `HIGH_VOLATILITY` | VIX > 20 or ATR ratio > 1.8 | 40% | VWAP Bounce only |
+| `UNKNOWN` | Insufficient data | 0% | None — trading blocked |
+
+Check live regime at: `GET /market_context`
 
 ---
 
 ## Risk Controls
 
-- **Position sizing**: Fixed-fraction (1% risk per trade by default)
+- **Position sizing**: Fixed-fraction (1% risk per trade by default), scaled by regime multiplier
 - **Daily drawdown gate**: Halts trading if cumulative loss exceeds 3% of capital
 - **Rate limiting**: Max 100 Kite API calls/minute (token-bucket algorithm)
+- **One trade per symbol per cycle**: Prevents over-trading a single instrument
 - **Never commit secrets**: `.env` is in `.gitignore`
 
 ---
@@ -135,8 +160,8 @@ celery -A evaluator_bot.celery_app beat --loglevel=info
 ```
 
 Schedule:
-- Every 30 minutes (Mon–Fri, 9:15–15:30 IST): performance metrics
-- 15:45 IST daily: AI-generated post-market report → Telegram
+- Every 30 minutes (Mon–Fri, 9:15–15:30 IST): compute and store performance metrics
+- 15:45 IST daily: AI post-market report (OpenAI GPT) → Telegram notification
 
 ---
 
