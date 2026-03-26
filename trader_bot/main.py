@@ -21,6 +21,8 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
 
+from trading_agent.chat import router as agent_router
+
 from config.settings import get_settings
 from trader_bot.auth import get_kite_client
 from trader_bot.data_stream import TickStreamer, get_latest_tick
@@ -100,6 +102,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Mount TradingAgent Q&A endpoints under /agent
+app.include_router(agent_router)
 
 
 # ---------------------------------------------------------------------------

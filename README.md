@@ -16,10 +16,15 @@ trading-bot/
 │   ├── execution.py       # Order placement, bracket orders, rate limiting
 │   ├── risk_manager.py    # Position sizing, drawdown gate, DB logging
 │   └── main.py            # FastAPI app + regime-aware trading loop
+├── trading_agent/
+│   ├── tools.py           # 8 callable tools (trades, news, FII/DII, Nifty, stats)
+│   ├── agent.py           # GPT-4o tool-calling agent core (ReAct loop)
+│   ├── briefing.py        # Morning briefing + post-trade explainer
+│   └── chat.py            # FastAPI router: /agent/chat, /agent/ask, /agent/briefing
 ├── evaluator_bot/
 │   ├── evaluator.py       # P&L, Sharpe, Win Rate, Max Drawdown
 │   ├── ai_advisor.py      # OpenAI / Kite MCP post-market report + Telegram
-│   └── celery_app.py      # Celery Beat scheduler
+│   └── celery_app.py      # Celery Beat scheduler (briefing + eval + summary)
 ├── config/
 │   └── settings.py        # Pydantic settings from .env
 ├── requirements.txt
@@ -171,3 +176,58 @@ Schedule:
 - Token cache stored with `chmod 600` permissions
 - Docker container runs as non-root user
 - `.gitignore` excludes `.env` and token cache file
+
+---
+
+## TradingAgent — AI Brain
+
+The TradingAgent is a GPT-4o-powered assistant that reasons over your real trade data.
+
+### Agent Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/agent/ask` | Single question, no history |
+| `POST` | `/agent/chat` | Multi-turn conversation |
+| `GET` | `/agent/briefing` | Trigger morning briefing on demand |
+
+### Example Questions
+
+```bash
+# Quick question
+curl -X POST http://localhost:8000/agent/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Why did I lose money last week?"}'
+
+# Multi-turn chat
+curl -X POST http://localhost:8000/agent/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Which strategy has the best win rate this month?"}'
+
+# Morning briefing on demand
+curl http://localhost:8000/agent/briefing
+```
+
+### Agent Tools
+
+The agent automatically decides which tools to call:
+
+| Tool | Data Source | What It Returns |
+|---|---|---|
+| `get_trade_history` | PostgreSQL | Closed trades with P&L |
+| `get_open_positions` | PostgreSQL | Currently open trades |
+| `get_market_context` | TraderBot API | Live regime + ADX + allowed strategies |
+| `get_strategy_stats` | PostgreSQL | Win rate + avg P&L per strategy |
+| `get_news` | Google News RSS | Headlines for a symbol or the market |
+| `get_fii_dii_data` | NSE India | Institutional buy/sell flow (last 5 days) |
+| `get_nifty_snapshot` | Kite Connect | Current Nifty price + day change |
+| `analyse_losing_trades` | PostgreSQL | Pattern analysis: bad days, tight stops |
+
+### Automated Schedules
+
+| Time (IST) | Task |
+|---|---|
+| 9:00 AM | Morning briefing → Telegram |
+| Every 30 min (9:15–15:30) | Performance metrics update |
+| 3:45 PM | End-of-day AI summary → Telegram |
+| After each trade closes | Post-trade explanation → Telegram |
