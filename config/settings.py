@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     ollama_model: str = Field(default="llama3.2", env="OLLAMA_MODEL")
     ollama_base_url: str = Field(default="http://localhost:11434/v1", env="OLLAMA_BASE_URL")
 
+    # --- GitHub Models (free, uses GitHub PAT — 150 req/day) ---
+    github_token: str = Field(default="", env="GITHUB_TOKEN")
+    github_model: str = Field(default="gpt-4o-mini", env="GITHUB_MODEL")
+    github_models_base_url: str = Field(default="https://models.inference.ai.azure.com", env="GITHUB_MODELS_BASE_URL")
+
+    # --- Evaluator LLM Provider (can differ from trading agent) ---
+    evaluator_llm_provider: str = Field(default="github", env="EVALUATOR_LLM_PROVIDER")
+
     # --- Risk Parameters ---
     max_risk_per_trade_pct: float = Field(default=1.0, env="MAX_RISK_PER_TRADE_PCT")   # 1% of capital
     max_daily_drawdown_pct: float = Field(default=3.0, env="MAX_DAILY_DRAWDOWN_PCT")   # 3% of capital

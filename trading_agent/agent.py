@@ -56,10 +56,21 @@ def _build_client() -> tuple[OpenAI, str]:
             settings.ollama_model,
         )
 
+    if provider == "github":
+        if not settings.github_token:
+            raise RuntimeError(
+                "GITHUB_TOKEN not set. Add your GitHub PAT to .env."
+            )
+        logger.info("LLM provider: GitHub Models (%s)", settings.github_model)
+        return (
+            OpenAI(api_key=settings.github_token, base_url=settings.github_models_base_url),
+            settings.github_model,
+        )
+
     # Default: OpenAI
     if not settings.openai_api_key:
         raise RuntimeError(
-            "OPENAI_API_KEY not set. Add it to .env or switch LLM_PROVIDER to deepseek/ollama."
+            "OPENAI_API_KEY not set. Add it to .env or switch LLM_PROVIDER to deepseek/ollama/github."
         )
     logger.info("LLM provider: OpenAI (%s)", settings.openai_model)
     return (

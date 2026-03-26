@@ -66,25 +66,64 @@ def get_mcp_config() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Option B: OpenAI GPT analysis
+# AI report generation — respects EVALUATOR_LLM_PROVIDER setting
+# Supported: github (default, free) | deepseek | openai | ollama
 # ---------------------------------------------------------------------------
 
-def generate_openai_report(metrics: dict, sample_trades: list) -> Optional[str]:
+def _build_evaluator_client():
+    """Build an OpenAI-compatible client for the evaluator provider."""
+    from openai import OpenAI
+    provider = getattr(settings, "evaluator_llm_provider", "github").lower()
+
+    if provider == "github":
+        if not settings.github_token:
+            raise RuntimeError(
+                "GITHUB_TOKEN not set. Add your GitHub PAT to .env — "
+                "free 150 req/day via GitHub Models."
+            )
+        logger.info("Evaluator LLM: GitHub Models (%s)", settings.github_model)
+        return (
+            OpenAI(api_key=settings.github_token, base_url=settings.github_models_base_url),
+            settings.github_model,
+        )
+
+    if provider == "deepseek":
+        if not settings.deepseek_api_key:
+            raise RuntimeError("DEEPSEEK_API_KEY not set.")
+        logger.info("Evaluator LLM: DeepSeek (%s)", settings.deepseek_model)
+        return (
+            OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url),
+            settings.deepseek_model,
+        )
+
+    if provider == "ollama":
+        logger.info("Evaluator LLM: Ollama (%s)", settings.ollama_model)
+        return (
+            OpenAI(api_key="ollama", base_url=settings.ollama_base_url),
+            settings.ollama_model,
+        )
+
+    # Default fallback: OpenAI
+    if not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY not set.")
+    logger.info("Evaluator LLM: OpenAI (%s)", settings.openai_model)
+    return (
+        OpenAI(api_key=settings.openai_api_key),
+        settings.openai_model,
+    )
+
+
+def generate_ai_report(metrics: dict, sample_trades: list) -> Optional[str]:
     """
-    Call OpenAI to generate a post-market analysis narrative.
+    Generate post-market analysis using the configured evaluator LLM provider.
+    Defaults to GitHub Models (free, uses your GitHub PAT).
     Returns the AI-generated report string, or None on failure.
     """
-    if not settings.openai_api_key:
-        logger.info("OPENAI_API_KEY not set — skipping AI report.")
-        return None
-
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=settings.openai_api_key)
-
+        client, model = _build_evaluator_client()
         prompt = _build_prompt(metrics, sample_trades)
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=model,
             messages=[
                 {
                     "role": "system",
@@ -100,12 +139,20 @@ def generate_openai_report(metrics: dict, sample_trades: list) -> Optional[str]:
             max_tokens=800,
             temperature=0.4,
         )
+        provider = getattr(settings, "evaluator_llm_provider", "github")
         report = response.choices[0].message.content
-        logger.info("AI report generated via OpenAI.")
+        logger.info("AI report generated via %s.", provider)
         return report
-    except Exception as exc:
-        logger.error("OpenAI report generation failed: %s", exc)
+    except RuntimeError as exc:
+        logger.warning("Evaluator LLM not configured: %s — skipping AI report.", exc)
         return None
+    except Exception as exc:
+        logger.error("AI report generation failed: %s", exc)
+        return None
+
+
+# Keep old name as alias for backward compatibility
+generate_openai_report = generate_ai_report
 
 
 def _build_prompt(metrics: dict, sample_trades: list) -> str:
@@ -163,7 +210,7 @@ def run_daily_advisor(target_date: Optional[date] = None) -> None:
     # Optionally append AI narrative
     df = fetch_trades(target_date)
     trades_list = df.to_dict("records") if not df.empty else []
-    ai_report = generate_openai_report(metrics, trades_list)
+    ai_report = generate_ai_report(metrics, trades_list)
     if ai_report:
         summary += f"\n\n*AI Analysis:*\n{ai_report}"
 
