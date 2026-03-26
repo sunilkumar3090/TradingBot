@@ -1,7 +1,12 @@
 """
 agent.py — Core TradingAgent with tool-calling loop.
 
-The agent uses OpenAI GPT-4o (or GPT-4o-mini) with function calling.
+Supports three LLM providers via LLM_PROVIDER in .env:
+  - deepseek : DeepSeek-V3 / R1 (recommended — cheap, powerful, OpenAI-compatible)
+  - openai   : GPT-4o / GPT-4o-mini
+  - ollama   : Local LLM via Ollama (free, offline, OpenAI-compatible)
+
+All providers use the OpenAI client with different base_url + api_key.
 It runs a ReAct-style loop:
   Thought → Tool call → Observe result → Thought → ... → Final answer
 
@@ -19,6 +24,48 @@ from trading_agent.tools import call_tool, get_tool_schemas
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+# ---------------------------------------------------------------------------
+# Provider factory
+# ---------------------------------------------------------------------------
+
+def _build_client() -> tuple[OpenAI, str]:
+    """
+    Build an OpenAI-compatible client for the configured LLM provider.
+    Returns (client, model_name).
+    """
+    provider = settings.llm_provider.lower()
+
+    if provider == "deepseek":
+        if not settings.deepseek_api_key:
+            raise RuntimeError(
+                "DEEPSEEK_API_KEY not set. "
+                "Get a free key at https://platform.deepseek.com and add it to .env"
+            )
+        logger.info("LLM provider: DeepSeek (%s)", settings.deepseek_model)
+        return (
+            OpenAI(api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url),
+            settings.deepseek_model,
+        )
+
+    if provider == "ollama":
+        logger.info("LLM provider: Ollama (%s) — local, free", settings.ollama_model)
+        return (
+            OpenAI(api_key="ollama", base_url=settings.ollama_base_url),
+            settings.ollama_model,
+        )
+
+    # Default: OpenAI
+    if not settings.openai_api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY not set. Add it to .env or switch LLM_PROVIDER to deepseek/ollama."
+        )
+    logger.info("LLM provider: OpenAI (%s)", settings.openai_model)
+    return (
+        OpenAI(api_key=settings.openai_api_key),
+        settings.openai_model,
+    )
 
 # System prompt — defines the agent's persona and constraints
 SYSTEM_PROMPT = """You are TradingAgent, an expert AI trading analyst for the Indian stock market.
@@ -51,15 +98,15 @@ class TradingAgent:
     """
     Stateless tool-calling agent. Call .run(query) to get a response.
     Conversation history is maintained per-session externally.
+
+    LLM provider is selected via LLM_PROVIDER in .env:
+      LLM_PROVIDER=deepseek  → DeepSeek-V3 (default, recommended)
+      LLM_PROVIDER=openai    → GPT-4o-mini
+      LLM_PROVIDER=ollama    → local Ollama model
     """
 
-    def __init__(self, model: str = "gpt-4o-mini", max_iterations: int = 6):
-        if not settings.openai_api_key:
-            raise RuntimeError(
-                "OPENAI_API_KEY not set. Add it to your .env file to use the TradingAgent."
-            )
-        self.client = OpenAI(api_key=settings.openai_api_key)
-        self.model = model
+    def __init__(self, max_iterations: int = 6):
+        self.client, self.model = _build_client()
         self.max_iterations = max_iterations
         self.tools = get_tool_schemas()
 

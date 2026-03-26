@@ -31,8 +31,21 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="", env="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(default="", env="TELEGRAM_CHAT_ID")
 
-    # --- OpenAI (optional, for AI advisor) ---
+    # --- LLM Provider (openai | deepseek | ollama) ---
+    llm_provider: str = Field(default="deepseek", env="LLM_PROVIDER")
+
+    # --- OpenAI ---
     openai_api_key: str = Field(default="", env="OPENAI_API_KEY")
+    openai_model: str = Field(default="gpt-4o-mini", env="OPENAI_MODEL")
+
+    # --- DeepSeek (recommended — cheap + powerful) ---
+    deepseek_api_key: str = Field(default="", env="DEEPSEEK_API_KEY")
+    deepseek_model: str = Field(default="deepseek-chat", env="DEEPSEEK_MODEL")
+    deepseek_base_url: str = Field(default="https://api.deepseek.com/v1", env="DEEPSEEK_BASE_URL")
+
+    # --- Ollama (local, free, offline) ---
+    ollama_model: str = Field(default="llama3.2", env="OLLAMA_MODEL")
+    ollama_base_url: str = Field(default="http://localhost:11434/v1", env="OLLAMA_BASE_URL")
 
     # --- Risk Parameters ---
     max_risk_per_trade_pct: float = Field(default=1.0, env="MAX_RISK_PER_TRADE_PCT")   # 1% of capital

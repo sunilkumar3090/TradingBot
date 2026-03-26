@@ -86,7 +86,7 @@ def run_morning_briefing() -> Optional[str]:
         return None
 
     try:
-        agent = TradingAgent(model="gpt-4o-mini", max_iterations=5)
+        agent = TradingAgent(max_iterations=5)
         prompt = MORNING_BRIEFING_PROMPT.format(today=date.today())
         answer, _ = agent.run(prompt)
 
@@ -109,7 +109,7 @@ def run_post_trade_explanation(trade: dict) -> Optional[str]:
         return None
 
     try:
-        agent = TradingAgent(model="gpt-4o-mini", max_iterations=4)
+        agent = TradingAgent(max_iterations=4)
         prompt = POST_TRADE_PROMPT.format(
             symbol=trade.get("symbol", "N/A"),
             strategy=trade.get("strategy", "N/A"),
