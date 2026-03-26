@@ -1,0 +1,23 @@
+# Git
+.git/
+.gitignore
+
+# Secrets — NEVER commit these
+.env
+.kite_token_cache.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Docker
+*.log
+
+# IDE
+.vscode/
+.idea/
