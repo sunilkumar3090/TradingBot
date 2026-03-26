@@ -262,6 +262,11 @@ def _trading_loop() -> None:
                     time.sleep(interval_seconds)
                 continue
 
+            # Expiry day (Thursday): cut position size by 50%
+            expiry_multiplier = 0.5 if _is_expiry_day() else 1.0
+            if _is_expiry_day():
+                logger.info("Expiry day detected — applying 0.5x position size multiplier.")
+
             logger.info(
                 "Regime: %s | ADX=%.1f | VR=%.2f | Bias=%s | SizeMult=%.1f",
                 context.regime, context.adx, context.volatility_ratio,
@@ -269,7 +274,14 @@ def _trading_loop() -> None:
             )
 
             # ── Step 2: Iterate watchlist ────────────────────────────────────
+            # Build set of symbols with an open position — avoid doubling up
+            open_symbols = _get_open_position_symbols(kite)
+
             for symbol in WATCHLIST:
+                # --- Open position check: skip if already in this symbol -----
+                if symbol in open_symbols:
+                    logger.info("Skipping %s — open position already exists.", symbol)
+                    continue
                 # Intraday 5-min candles for strategy signals
                 df_intraday = _fetch_ohlcv(kite, symbol, interval="5minute", days=3)
                 if df_intraday is None or df_intraday.empty:
@@ -298,7 +310,7 @@ def _trading_loop() -> None:
                         entry_price=signal.entry_price,
                         stop_loss=signal.stop_loss,
                     )
-                    qty = max(int(base_qty * context.position_size_multiplier), 1)
+                    qty = max(int(base_qty * context.position_size_multiplier * expiry_multiplier), 1)
 
                     logger.info(
                         "[%s] Signal: %s %s qty=%d entry=%.2f sl=%.2f tgt=%.2f (confidence=%.0f%%)",
@@ -383,6 +395,46 @@ def _fetch_ohlcv(
     except Exception as exc:
         logger.error("Failed to fetch OHLCV for %s: %s", symbol, exc)
         return None
+
+
+def _get_open_position_symbols(kite) -> set:
+    """
+    Return a set of symbols that currently have an open intraday position.
+    Checks both the Kite API day positions and the local DB open trades.
+    """
+    symbols = set()
+    try:
+        positions = kite.positions().get("day", [])
+        for pos in positions:
+            if int(pos.get("quantity", 0)) != 0:
+                symbols.add(pos.get("tradingsymbol", ""))
+    except Exception as exc:
+        logger.warning("Could not fetch Kite positions for dedup check: %s", exc)
+
+    # Also check local DB open trades
+    try:
+        from sqlalchemy import text as sa_text
+        from trader_bot.risk_manager import get_engine
+        from datetime import date
+        with get_engine().connect() as conn:
+            rows = conn.execute(
+                sa_text("SELECT symbol FROM trades WHERE status='OPEN' AND trade_date=:d"),
+                {"d": date.today()},
+            ).fetchall()
+        symbols.update(r[0] for r in rows)
+    except Exception as exc:
+        logger.warning("Could not query DB open trades for dedup check: %s", exc)
+
+    return symbols
+
+
+def _is_expiry_day() -> bool:
+    """
+    Return True if today is a weekly expiry day (Thursday for NSE F&O).
+    On expiry days, reduce exposure — volatility is unpredictable near close.
+    """
+    from datetime import date
+    return date.today().weekday() == 3  # 3 = Thursday
 
 
 def _stop_trading() -> int:

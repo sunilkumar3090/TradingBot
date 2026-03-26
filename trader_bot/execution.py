@@ -140,7 +140,7 @@ def place_bracket_order(
     )
 
     # Wait for entry to fill before placing exit legs
-    filled = _wait_for_fill(kite, entry_order_id, timeout_seconds=30)
+    filled = _wait_for_fill(kite, entry_order_id, timeout_seconds=120)
     if not filled:
         logger.warning("Entry order %s did not fill in time. Cancelling.", entry_order_id)
         cancel_order(kite, entry_order_id)
@@ -148,29 +148,44 @@ def place_bracket_order(
 
     exit_side = "SELL" if transaction_type == "BUY" else "BUY"
 
-    # Leg 2: Target
-    target_order_id = place_order(
-        kite=kite,
-        symbol=symbol,
-        exchange=exchange,
-        transaction_type=exit_side,
-        quantity=quantity,
-        order_type="LIMIT",
-        price=target_price,
-        tag=f"{tag}_TGT",
-    )
+    # Leg 2: Target — if this fails, cancel everything to avoid orphan SL
+    try:
+        target_order_id = place_order(
+            kite=kite,
+            symbol=symbol,
+            exchange=exchange,
+            transaction_type=exit_side,
+            quantity=quantity,
+            order_type="LIMIT",
+            price=target_price,
+            tag=f"{tag}_TGT",
+        )
+    except Exception as exc:
+        logger.error("Target order failed for %s — placing market exit to close position.", symbol)
+        place_order(kite=kite, symbol=symbol, exchange=exchange,
+                    transaction_type=exit_side, quantity=quantity,
+                    order_type="MARKET", tag=f"{tag}_EMERGENCY_EXIT")
+        return {"entry_order_id": entry_order_id, "status": "TARGET_FAILED_MARKET_EXIT"}
 
-    # Leg 3: Stop-loss
-    sl_order_id = place_order(
-        kite=kite,
-        symbol=symbol,
-        exchange=exchange,
-        transaction_type=exit_side,
-        quantity=quantity,
-        order_type="SL-M",
-        trigger_price=stop_loss_trigger,
-        tag=f"{tag}_SL",
-    )
+    # Leg 3: Stop-loss — if this fails, cancel target and place market exit
+    try:
+        sl_order_id = place_order(
+            kite=kite,
+            symbol=symbol,
+            exchange=exchange,
+            transaction_type=exit_side,
+            quantity=quantity,
+            order_type="SL-M",
+            trigger_price=stop_loss_trigger,
+            tag=f"{tag}_SL",
+        )
+    except Exception as exc:
+        logger.error("SL order failed for %s — cancelling target, placing market exit.", symbol)
+        cancel_order(kite, target_order_id)
+        place_order(kite=kite, symbol=symbol, exchange=exchange,
+                    transaction_type=exit_side, quantity=quantity,
+                    order_type="MARKET", tag=f"{tag}_EMERGENCY_EXIT")
+        return {"entry_order_id": entry_order_id, "status": "SL_FAILED_MARKET_EXIT"}
 
     return {
         "entry_order_id": entry_order_id,

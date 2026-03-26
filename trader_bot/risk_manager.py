@@ -199,12 +199,28 @@ def log_trade(
 
 
 def close_trade(trade_id: int, exit_price: float, status: str = "CLOSED") -> None:
-    """Update a trade record with exit price and final P&L."""
+    """
+    Update a trade record with exit price and net P&L after brokerage/STT.
+
+    Cost model (Zerodha intraday MIS):
+      - Brokerage: ₹20 per executed order (entry + exit = ₹40 flat)
+      - STT: 0.025% of sell-side turnover
+      - Exchange + SEBI fees: ~0.00345% of turnover
+      Total round-trip approximation: ₹40 + 0.03% of position value
+    """
     sql = text(
         """
         UPDATE trades
         SET exit_price = :exit_price,
-            pnl        = (exit_price - entry_price) * quantity * CASE WHEN side='BUY' THEN 1 ELSE -1 END,
+            pnl        = (
+                            (exit_price - entry_price)
+                            * quantity
+                            * CASE WHEN side='BUY' THEN 1 ELSE -1 END
+                         )
+                         -- Brokerage: ₹20 per leg = ₹40 round trip
+                         - 40
+                         -- STT + exchange fees ≈ 0.03% of entry turnover
+                         - (entry_price * quantity * 0.0003),
             status     = :status,
             updated_at = NOW()
         WHERE id = :id
@@ -214,6 +230,6 @@ def close_trade(trade_id: int, exit_price: float, status: str = "CLOSED") -> Non
         with get_engine().connect() as conn:
             conn.execute(sql, {"exit_price": exit_price, "status": status, "id": trade_id})
             conn.commit()
-        logger.info("Trade %s closed at %.2f", trade_id, exit_price)
+        logger.info("Trade %s closed at %.2f (cost-adjusted P&L)", trade_id, exit_price)
     except SQLAlchemyError as exc:
         logger.error("Failed to close trade %s: %s", trade_id, exc)

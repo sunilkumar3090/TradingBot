@@ -313,7 +313,18 @@ class VWAPStrategy(Strategy):
         self._validate_df(df, min_rows=10)
         df = df.copy()
 
-        # Compute VWAP and bands for the session
+        # --- FIX: Reset VWAP per session — only use today's candles -----------
+        if isinstance(df.index, pd.DatetimeIndex):
+            today = df.index[-1].date()
+            df = df[df.index.date == today]
+            if len(df) < 5:
+                return Signal(
+                    signal_type=SignalType.HOLD, symbol=symbol,
+                    entry_price=0.0, stop_loss=0.0, target=0.0,
+                    strategy_name="VWAP", notes="Insufficient today's data",
+                )
+
+        # Compute VWAP and bands — cumsum now correctly scoped to today's session
         df["typical_price"] = (df["high"] + df["low"] + df["close"]) / 3
         df["tp_vol"] = df["typical_price"] * df["volume"]
         df["cum_tp_vol"] = df["tp_vol"].cumsum()
@@ -336,11 +347,17 @@ class VWAPStrategy(Strategy):
         avg_vol = df["volume"].rolling(20).mean().iloc[-1]
         vol_confirm = curr["volume"] > avg_vol * 1.2
 
+        # --- 200 EMA trend filter: only trade in direction of trend -----------
+        ema200 = float(df["close"].ewm(span=min(200, len(df)), adjust=False).mean().iloc[-1])
+        bullish_trend = float(curr["close"]) > ema200
+        bearish_trend = float(curr["close"]) < ema200
+
         # --- Long: bounce off lower VWAP band ---------------------------------
         if (
             prev["close"] <= prev["lower_band"]
             and curr["close"] > curr["lower_band"]
             and vol_confirm
+            and bullish_trend
         ):
             stop_loss = round(entry - self.atr_multiplier * atr, 2)
             target = round(vwap + (vwap - stop_loss), 2)  # target = opposite VWAP side
@@ -361,6 +378,7 @@ class VWAPStrategy(Strategy):
             and curr["low"] <= curr["vwap"]
             and curr["close"] > curr["vwap"]
             and vol_confirm
+            and bullish_trend
         ):
             stop_loss = round(lower, 2)
             target = round(upper, 2)
@@ -380,6 +398,7 @@ class VWAPStrategy(Strategy):
             prev["close"] >= prev["upper_band"]
             and curr["close"] < curr["upper_band"]
             and vol_confirm
+            and bearish_trend
         ):
             stop_loss = round(entry + self.atr_multiplier * atr, 2)
             target = round(vwap - (stop_loss - vwap), 2)
@@ -440,6 +459,12 @@ class ORBStrategy(Strategy):
         if not isinstance(df.index, pd.DatetimeIndex):
             raise ValueError("ORBStrategy requires a DatetimeIndex.")
 
+        # --- FIX: Use only today's candles for opening range ------------------
+        today = df.index[-1].date()
+        df = df[df.index.date == today]
+        if len(df) < 3:
+            return self._hold(symbol, df)
+
         session_start = df.index[0]
         or_end = session_start + pd.Timedelta(minutes=self.opening_range_minutes)
 
@@ -463,11 +488,17 @@ class ORBStrategy(Strategy):
         avg_vol = df["volume"].rolling(10).mean().iloc[-1]
         vol_confirm = float(curr["volume"]) > avg_vol * self.volume_multiplier
 
+        # --- 200 EMA trend filter on today's data (use or_df ema as proxy) ---
+        ema200 = float(df["close"].ewm(span=min(200, len(df)), adjust=False).mean().iloc[-1])
+        bullish_trend = entry > ema200
+        bearish_trend = entry < ema200
+
         # --- Bullish breakout -------------------------------------------------
         if (
             float(prev["close"]) <= or_high
             and entry > or_high
             and vol_confirm
+            and bullish_trend
         ):
             stop_loss = round(or_low, 2)
             risk = entry - stop_loss
@@ -491,6 +522,7 @@ class ORBStrategy(Strategy):
             float(prev["close"]) >= or_low
             and entry < or_low
             and vol_confirm
+            and bearish_trend
         ):
             stop_loss = round(or_high, 2)
             risk = stop_loss - entry
